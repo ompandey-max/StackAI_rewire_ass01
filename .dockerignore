@@ -1,0 +1,19 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.claude
+skills
+starter-code
+tests
+data
+*.docx
+*.pdf
+*.xlsx
+HANDOFF.md
+Helper Guide.md
+README.md
+outputs/artifacts/*
+!outputs/artifacts/model.joblib

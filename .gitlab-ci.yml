@@ -1,0 +1,118 @@
+stages:
+  - lint
+  - unit
+  - contract
+  - integration
+  - build
+  - push
+  - qa
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_HOST: "tcp://docker:2376"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "/certs/client"
+
+default:
+  image: python:3.12.12-slim-bookworm
+  cache:
+    key: python-dependencies
+    paths:
+      - .cache/pip
+  before_script:
+    - python -m pip install --disable-pip-version-check -r requirements.txt
+
+lint:
+  stage: lint
+  script:
+    - ruff check app tests
+
+unit_tests:
+  stage: unit
+  script:
+    - python -m pytest -q tests/test_unit.py
+
+contract_tests:
+  stage: contract
+  script:
+    - python -m pytest -q tests/test_contract.py
+
+integration_tests:
+  stage: integration
+  script:
+    - python -m pytest -q tests/test_integration.py
+
+build_image:
+  stage: build
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      alias: docker
+  before_script: []
+  script:
+    - docker build --pull --tag "house-price-serving:$CI_COMMIT_SHORT_SHA" .
+    - docker save --output image.tar "house-price-serving:$CI_COMMIT_SHORT_SHA"
+  artifacts:
+    paths:
+      - image.tar
+    expire_in: 1 day
+
+push_image:
+  stage: push
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      alias: docker
+  before_script: []
+  needs:
+    - job: build_image
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - test -n "$DOCKERHUB_USERNAME"
+    - test -n "$DOCKERHUB_TOKEN"
+    - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+    - docker load --input image.tar
+    - docker tag "house-price-serving:$CI_COMMIT_SHORT_SHA" "$DOCKERHUB_USERNAME/house-price-serving:$CI_COMMIT_SHORT_SHA"
+    - docker push "$DOCKERHUB_USERNAME/house-price-serving:$CI_COMMIT_SHORT_SHA"
+    - docker logout
+
+qa_smoke_test:
+  stage: qa
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      alias: docker
+  before_script: []
+  needs:
+    - job: push_image
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  environment:
+    name: qa
+  script:
+    - test -n "$DOCKERHUB_USERNAME"
+    - test -n "$DOCKERHUB_TOKEN"
+    - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+    - image="$DOCKERHUB_USERNAME/house-price-serving:$CI_COMMIT_SHORT_SHA"
+    - docker pull "$image"
+    - docker run --detach --name qa-smoke --env "MODEL_VERSION=$CI_COMMIT_SHORT_SHA" --env "EXPECTED_MODEL_VERSION=$CI_COMMIT_SHORT_SHA" "$image"
+    - |
+      attempt=0
+      until docker exec qa-smoke python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=1)' >/dev/null 2>&1; do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+          docker logs qa-smoke
+          exit 1
+        fi
+        sleep 1
+      done
+    - |
+      docker exec qa-smoke python -c 'import json, os, urllib.request; base="http://127.0.0.1:8000"; health=json.load(urllib.request.urlopen(base+"/health", timeout=2)); assert health["status"] == "ok"; assert health["model_version"] == os.environ["EXPECTED_MODEL_VERSION"]; request=urllib.request.Request(base+"/predict", data=json.dumps({"sqft":1500,"bedrooms":3,"bathrooms":2.0,"age_years":10,"location_score":7.5}).encode(), headers={"Content-Type":"application/json"}); prediction=json.load(urllib.request.urlopen(request, timeout=2)); assert isinstance(prediction["prediction"], float); print(json.dumps({"health":health,"prediction":prediction}))'
+    - docker rm --force qa-smoke
+    - docker logout
+  after_script:
+    - docker rm --force qa-smoke || true
+    - docker logout || true

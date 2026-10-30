@@ -1,0 +1,22 @@
+.venv/
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+data/
+starter-code/
+*.docx
+*.pdf
+*.xlsx
+HANDOFF.md
+Helper Guide.md
+.claude/
+skills/
+
+outputs/artifacts/*
+!outputs/artifacts/model.joblib
+!outputs/artifacts/model_card.md
+!outputs/artifacts/spec.md
